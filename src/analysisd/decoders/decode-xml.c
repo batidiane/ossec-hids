@@ -214,6 +214,7 @@ int ReadDecodeXML(char *file)
     char *xml_type = "type";
     char *xml_fts = "fts";
     char *xml_ftscomment = "ftscomment";
+    char *xml_accumulate = "accumulate";
 
     int i = 0;
     OSDecoderInfo *NULL_Decoder_tmp = NULL;
@@ -323,7 +324,7 @@ int ReadDecodeXML(char *file)
         pi = (OSDecoderInfo *)calloc(1,sizeof(OSDecoderInfo));
         if(pi == NULL)
         {
-            merror(MEM_ERROR,ARGV0);
+            merror(MEM_ERROR,ARGV0, errno, strerror(errno));
             return(0);
         }
 
@@ -335,6 +336,7 @@ int ReadDecodeXML(char *file)
         pi->order = NULL;
         pi->plugindecoder = NULL;
         pi->fts = 0;
+        pi->accumulate = 0;
         pi->type = SYSLOG;
         pi->prematch = NULL;
         pi->program_name = NULL;
@@ -352,14 +354,14 @@ int ReadDecodeXML(char *file)
         /* Checking if strdup worked */
         if(!pi->name)
         {
-            merror(MEM_ERROR, ARGV0);
+            merror(MEM_ERROR, ARGV0, errno, strerror(errno));
             return(0);
         }
 
         /* Add decoder */
         if(!addDecoder2list(pi->name))
         {
-            merror(MEM_ERROR, ARGV0);
+            merror(MEM_ERROR, ARGV0, errno, strerror(errno));
             return(0);
         }
 
@@ -619,6 +621,12 @@ int ReadDecodeXML(char *file)
                 free(s_norder);
             }
 
+            else if(strcasecmp(elements[j]->element,xml_accumulate)==0)
+            {
+                /* Enable Accumulator */
+                pi->accumulate = 1;
+            }
+
             /* Getting the fts order */
             else if(strcasecmp(elements[j]->element,xml_fts)==0)
             {
@@ -628,7 +636,7 @@ int ReadDecodeXML(char *file)
                 /* Maximum number is 8 for the fts */
                 norder = OS_StrBreak(',',elements[j]->content, 8);
                 if(norder == NULL)
-                    ErrorExit(MEM_ERROR,ARGV0);
+                    ErrorExit(MEM_ERROR,ARGV0, errno, strerror(errno));
 
 
                 /* Saving the initial point to free later */
@@ -914,7 +922,7 @@ char *_loadmemory(char *at, char *str)
             at = calloc(strsize+1,sizeof(char));
             if(at == NULL)
             {
-                merror(MEM_ERROR,ARGV0);
+                merror(MEM_ERROR,ARGV0, errno, strerror(errno));
                 return(NULL);
             }
             strncpy(at,str,strsize);
@@ -940,7 +948,7 @@ char *_loadmemory(char *at, char *str)
         at = realloc(at, (finalsize +1)*sizeof(char));
         if(at == NULL)
         {
-            merror(MEM_ERROR,ARGV0);
+            merror(MEM_ERROR,ARGV0, errno, strerror(errno));
             return(NULL);
         }
         strncat(at,str,strsize);

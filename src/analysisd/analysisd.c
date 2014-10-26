@@ -44,16 +44,17 @@
 #include "stats.h"
 
 #include "eventinfo.h"
+#include "accumulator.h"
 #include "analysisd.h"
 
-#include "picviz.h"
+#include "output/picviz.h"
 
 #ifdef PRELUDE
-#include "prelude.h"
+#include "output/prelude.h"
 #endif
 
 #ifdef ZEROMQ_OUTPUT
-#include "zeromq_output.h"
+#include "output/zeromq.h"
 #endif
 
 /** Global data **/
@@ -116,7 +117,7 @@ void HostinfoInit();
 
 /* For stats */
 int Start_Hour();
-int Check_Hour(Eventinfo *lf);
+int Check_Hour();
 void Update_Hour();
 void DumpLogstats();
 
@@ -126,6 +127,25 @@ int hourly_events;
 int hourly_syscheck;
 int hourly_firewall;
 
+/* print help statement */
+void help_analysisd()
+{
+    print_header();
+    print_out("  %s: -[Vhdtf] [-u user] [-g group] [-c config] [-D dir]", ARGV0);
+    print_out("    -V          Version and license message");
+    print_out("    -h          This help message");
+    print_out("    -d          Execute in debug mode. This parameter");
+    print_out("                can be specified multiple times");
+    print_out("                to increase the debug level.");
+    print_out("    -t          Test configuration");
+    print_out("    -f          Run in foreground");
+    print_out("    -u <user>   User to run as (default: %s)", USER);
+    print_out("    -g <group>  Group to run as (default: %s)", GROUPGLOBAL);
+    print_out("    -c <config> Configuration file to use (default: %s)", DEFAULTCPATH);
+    print_out("    -D <dir>    Directory to chroot into (default: %s)", DEFAULTDIR);
+    print_out(" ");
+    exit(1);
+}
 
 /** int main(int argc, char **argv)
  */
@@ -140,7 +160,8 @@ int main_analysisd(int argc, char **argv)
     char *dir = DEFAULTDIR;
     char *user = USER;
     char *group = GROUPGLOBAL;
-    int uid = 0,gid = 0;
+    uid_t uid;
+    gid_t gid;
 
     char *cfg = DEFAULTCPATH;
 
@@ -162,7 +183,7 @@ int main_analysisd(int argc, char **argv)
 		print_version();
 		break;
             case 'h':
-                help(ARGV0);
+                help_analysisd();
                 break;
             case 'd':
                 nowDebug();
@@ -195,14 +216,14 @@ int main_analysisd(int argc, char **argv)
                 test_config = 1;
                 break;
             default:
-                help(ARGV0);
+                help_analysisd();
                 break;
         }
 
     }
 
     /* Check current debug_level
-     * Command line setting takes precedence 
+     * Command line setting takes precedence
      */
     if (debug_level == 0)
     {
@@ -224,7 +245,7 @@ int main_analysisd(int argc, char **argv)
     /*Check if the user/group given are valid */
     uid = Privsep_GetUser(user);
     gid = Privsep_GetGroup(group);
-    if((uid < 0)||(gid < 0))
+    if(uid == (uid_t)-1 || gid == (gid_t)-1)
         ErrorExit(USER_ERROR,ARGV0,user,group);
 
 
@@ -234,7 +255,7 @@ int main_analysisd(int argc, char **argv)
 
     /* Initializing Active response */
     AR_Init();
-    if(AR_ReadConfig(test_config, cfg) < 0)
+    if(AR_ReadConfig(cfg) < 0)
     {
         ErrorExit(CONFIG_ERROR,ARGV0, cfg);
     }
@@ -289,7 +310,7 @@ int main_analysisd(int argc, char **argv)
     #endif
 
     /* Starting zeromq */
-    #ifdef ZEROMQ_OUTPUT 
+    #ifdef ZEROMQ_OUTPUT
     if(Config.zeromq_output)
     {
       zeromq_output_start(Config.zeromq_output_uri, argc, argv);
@@ -300,16 +321,20 @@ int main_analysisd(int argc, char **argv)
     if(Config.picviz)
     {
         OS_PicvizOpen(Config.picviz_socket);
-        chown(Config.picviz_socket, uid, gid);
+
+        if(chown(Config.picviz_socket, uid, gid) == -1)
+        {
+            ErrorExit(CHOWN_ERROR, ARGV0, Config.picviz_socket, errno, strerror(errno));
+        }
     }
 
-    /* Setting the group */	
+    /* Setting the group */
     if(Privsep_SetGroup(gid) < 0)
-        ErrorExit(SETGID_ERROR,ARGV0,group);
+        ErrorExit(SETGID_ERROR,ARGV0,group, errno, strerror(errno));
 
     /* Chrooting */
     if(Privsep_Chroot(dir) < 0)
-        ErrorExit(CHROOT_ERROR,ARGV0,dir);
+        ErrorExit(CHROOT_ERROR,ARGV0,dir, errno, strerror(errno));
 
 
     nowChroot();
@@ -438,7 +463,7 @@ int main_analysisd(int argc, char **argv)
         Config.g_rules_hash = OSHash_Create();
         if(!Config.g_rules_hash)
         {
-            ErrorExit(MEM_ERROR, ARGV0);
+            ErrorExit(MEM_ERROR, ARGV0, errno, strerror(errno));
         }
         AddHash_Rule(tmp_node);
     }
@@ -479,7 +504,7 @@ int main_analysisd(int argc, char **argv)
 
     /* Setting the user */
     if(Privsep_SetUser(uid) < 0)
-        ErrorExit(SETUID_ERROR,ARGV0,user);
+        ErrorExit(SETUID_ERROR,ARGV0,user, errno, strerror(errno));
 
 
     /* Creating the PID file */
@@ -551,7 +576,7 @@ int main_analysisd(int argc, char **argv)
     verbose(STARTUP_MSG, ARGV0, (int)getpid());
 
 
-    /* Going to main loop */	
+    /* Going to main loop */
     OS_ReadMSG(m_queue);
 
     if (Config.picviz)
@@ -579,7 +604,7 @@ void OS_ReadMSG_analysisd(int m_queue)
     char msg[OS_MAXSTR +1];
     Eventinfo *lf;
 
-    RuleInfo *stats_rule;
+    RuleInfo *stats_rule = NULL;
 
 
     /* Null to global currently pointers */
@@ -611,6 +636,11 @@ void OS_ReadMSG_analysisd(int m_queue)
         ErrorExit(FTS_LIST_ERROR, ARGV0);
     }
 
+    /* Initialize the Accumulator */
+    if(!Accumulate_Init()) {
+        merror("accumulator: ERROR: Initialization failed");
+        exit(1);
+    }
 
     /* Starting the active response queues */
     if(Config.ar)
@@ -702,7 +732,7 @@ void OS_ReadMSG_analysisd(int m_queue)
 
         if(!stats_rule)
         {
-            ErrorExit(MEM_ERROR, ARGV0);
+            ErrorExit(MEM_ERROR, ARGV0, errno, strerror(errno));
         }
         stats_rule->group = "stats,";
         stats_rule->comment = "Excessive number of events (above normal).";
@@ -717,7 +747,7 @@ void OS_ReadMSG_analysisd(int m_queue)
     {
         lf = (Eventinfo *)calloc(1,sizeof(Eventinfo));
         if(!lf)
-            ErrorExit(MEM_ERROR, ARGV0);
+            ErrorExit(MEM_ERROR, ARGV0, errno, strerror(errno));
         lf->year = prev_year;
         strncpy(lf->mon, prev_month, 3);
         lf->day = today;
@@ -744,7 +774,7 @@ void OS_ReadMSG_analysisd(int m_queue)
         /* This shouldn't happen .. */
         if(lf == NULL)
         {
-            ErrorExit(MEM_ERROR,ARGV0);
+            ErrorExit(MEM_ERROR,ARGV0, errno, strerror(errno));
         }
 
         DEBUG_MSG("%s: DEBUG: Waiting for msgs - %d ", ARGV0, (int)time(0));
@@ -877,6 +907,10 @@ void OS_ReadMSG_analysisd(int m_queue)
                 DecodeEvent(lf);
             }
 
+            /* Run accumulator */
+            if( lf->decoder_info->accumulate == 1 ) {
+                lf = Accumulate(lf);
+            }
 
             /* Firewall event */
             if(lf->decoder_info->type == FIREWALL)
@@ -911,7 +945,7 @@ void OS_ReadMSG_analysisd(int m_queue)
             /* Stats checking */
             if(Config.stats)
             {
-                if(Check_Hour(lf) == 1)
+                if(Check_Hour() == 1)
                 {
                     void *saved_rule = lf->generated_rule;
                     char *saved_log;
@@ -1066,8 +1100,8 @@ void OS_ReadMSG_analysisd(int m_queue)
                 #endif
 
                 /* Log to zeromq */
-                #ifdef ZEROMQ_OUTPUT 
-                if(Config.zeromq_output) 
+                #ifdef ZEROMQ_OUTPUT
+                if(Config.zeromq_output)
                 {
                     zeromq_output_event(lf);
                 }
@@ -1171,7 +1205,7 @@ void OS_ReadMSG_analysisd(int m_queue)
                 OS_Store(lf);
 
 
-            /* Cleaning the memory */	
+            /* Cleaning the memory */
             CLMEM:
 
 
@@ -1277,8 +1311,7 @@ RuleInfo *OS_CheckIfRuleMatch(Eventinfo *lf, RuleNode *curr_node)
     {
         if(!OSMatch_Execute(lf->log, lf->size, currently_rule->match))
             return(NULL);
-    }	   	
-
+    }
 
 
     /* Checking if exist any regex for this rule */
@@ -1719,7 +1752,7 @@ void DumpLogstats()
     if(IsDir(logfile) == -1)
         if(mkdir(logfile,0770) == -1)
         {
-            merror(MKDIR_ERROR, ARGV0, logfile);
+            merror(MKDIR_ERROR, ARGV0, logfile, errno, strerror(errno));
             return;
         }
 
@@ -1728,7 +1761,7 @@ void DumpLogstats()
     if(IsDir(logfile) == -1)
         if(mkdir(logfile,0770) == -1)
         {
-            merror(MKDIR_ERROR,ARGV0,logfile);
+            merror(MKDIR_ERROR,ARGV0,logfile, errno, strerror(errno));
             return;
         }
 
@@ -1744,7 +1777,7 @@ void DumpLogstats()
     flog = fopen(logfile, "a");
     if(!flog)
     {
-        merror(FOPEN_ERROR, ARGV0, logfile);
+        merror(FOPEN_ERROR, ARGV0, logfile, errno, strerror(errno));
         return;
     }
 
